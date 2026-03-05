@@ -1,0 +1,20 @@
+[
+  {
+    "name": "__diamwall",
+    "value": "0x1110792600",
+    "domain": ".satellitestress.st",
+    "path": "/"
+  },
+  {
+    "name": "satellite_auth",
+    "value": "971c225b-8d48-4788-be56-2e5295bda170",
+    "domain": ".satellitestress.st",
+    "path": "/"
+  },
+  {
+    "name": "satellite_captcha_verified",
+    "value": "HC2.eyJ2IjoxLCJ1aWQiOiJiNjU2OWVjOGVjZjFkM2ZhIiwiaWF0IjoxNzcyNzIwNjgzODM0LCJleHAiOjE3NzI4MDcwODM4MzQsIm5vbmNlIjoiMjg3YTJhYmRlM2RhY2ViYyJ9.NR8z3ft6xCVc3z6ySecuSqea6PBVeEDBvErNTirtyns",
+    "domain": ".satellitestress.st",
+    "path": "/"
+  }
+]
